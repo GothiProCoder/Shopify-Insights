@@ -1,0 +1,18 @@
+# Core Framework & Server
+fastapi
+uvicorn[standard]
+
+# HTTP Requests & Web Scraping
+httpx
+beautifulsoup4
+lxml # A faster parser for BeautifulSoup
+
+# Data Validation (though a FastAPI dependency, good to be explicit)
+pydantic
+
+# For parsing emails and social handles reliably
+beautifulsoup4-helpers
+
+# Add these lines for the bonus database feature
+sqlalchemy
+pymysql # To show we can support MySQL as requested
