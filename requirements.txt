@@ -16,3 +16,7 @@ beautifulsoup4-helpers
 # Add these lines for the bonus database feature
 sqlalchemy
 pymysql # To show we can support MySQL as requested
+
+# For Gemini Integration
+google-generativeai
+python-dotenv
