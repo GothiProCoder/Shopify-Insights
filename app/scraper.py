@@ -1,15 +1,8 @@
-import os
-import json
-import google.generativeai as genai
-from dotenv import load_dotenv
 import httpx
 import re
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 from typing import List, Dict, Optional
-
-# Load the environment variables (like your API key) from the .env file
-load_dotenv()
 
 # Import our Pydantic models
 from app.models import Product, BrandInsights, ContactDetails, Policy
@@ -34,79 +27,83 @@ class ShopifyScraper:
             follow_redirects=True
         )
 
-    async def _scrape_faqs_with_gemini(self, faq_url: str) -> List[Dict[str, str]]:
+    async def _scrape_faqs(self, faq_url: str) -> List[Dict[str, str]]:
         """
-        Uses Google's Gemini Pro to extract FAQs from the raw HTML of a page.
+        A robust, multi-layered scraper to extract FAQs from a given URL.
+        It handles single-page accordions and multi-page linked questions.
         """
-        print(f"--- Starting AI-Powered FAQ Hunt at: {faq_url} ---")
+        print(f"--- Starting FAQ Hunt at: {faq_url} ---")
         faq_soup = await self._get_soup(faq_url)
         if not faq_soup:
             return []
-
-        # 1. Clean the HTML for the LLM
-        # Remove script and style tags as they are noise for the LLM
-        for tag in faq_soup(['script', 'style', 'nav', 'footer', 'header']):
-            tag.decompose()
+    
+        faqs_list = []
+    
+        # --- STRATEGY 1: The Accordion Hunter ---
+        # Look for common container patterns for FAQ items.
+        # The <details> tag is a modern, semantic tag for accordions.
+        # Otherwise, look for divs with class names containing "faq", "accordion", "item", "question".
+        potential_items = faq_soup.select('details, div[class*="faq"], div[class*="accordion"], div[class*="item"]')
         
-        html_content = str(faq_soup.body) # Get the content of the body
-
-        # 2. Configure the Gemini API
-        try:
-            api_key = os.getenv("GOOGLE_API_KEY")
-            if not api_key:
-                print("ERROR: GOOGLE_API_KEY not found in .env file.")
-                return []
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel('gemini-pro')
-        except Exception as e:
-            print(f"Error configuring Gemini: {e}")
-            return []
+        for item in potential_items:
+            question_tag = None
+            answer_tag = None
+    
+            # Try to find a question-like element (heading, strong tag, or button)
+            question_tag = item.find(['h2', 'h3', 'h4', 'strong', 'b']) or item.find(role='button')
             
-        # 3. Craft the Prompt
-        prompt = f"""
-        You are an expert web scraper and data extractor. Your task is to analyze the following raw HTML content from a website's FAQ page and extract all the Question and Answer pairs.
-
-        Please adhere to these rules:
-        1. Identify every distinct question and its corresponding answer.
-        2. Format your response as a valid JSON array of objects.
-        3. Each object in the array must have two keys: "question" and "answer".
-        4. The "question" key's value should be the full question text.
-        5. The "answer" key's value should be the full answer text, preserving line breaks.
-        6. If you cannot find any FAQs in the provided HTML, you MUST return an empty JSON array: [].
-        7. Do not include any text, explanation, or markdown formatting outside of the final JSON array.
-
-        Here is the HTML content to analyze:
-        ```html
-        {html_content}
-        ```
-        """
-
-        # 4. Make the API Call and Parse the Response
-        try:
-            print("  Sending HTML content to Gemini for analysis...")
-            response = model.generate_content(prompt)
-            
-            # Clean up the response from Gemini, which might be wrapped in markdown
-            cleaned_response = response.text.strip().replace('```json', '').replace('```', '').strip()
-            
-            print("  Received response from Gemini. Parsing JSON...")
-            faqs_list = json.loads(cleaned_response)
-            
-            # Final validation to ensure it's a list of dicts
-            if isinstance(faqs_list, list):
-                print(f"--- AI Hunt Successful: Extracted {len(faqs_list)} FAQs. ---")
-                return faqs_list
-            else:
-                print("--- AI Hunt Warning: Gemini did not return a valid list. ---")
-                return []
-
-        except json.JSONDecodeError:
-            print("--- AI Hunt FAILED: Gemini returned invalid JSON. ---")
-            print("Gemini's raw response:", response.text)
-            return []
-        except Exception as e:
-            print(f"--- AI Hunt FAILED: An unexpected error occurred: {e} ---")
-            return []
+            # Try to find an answer-like element (a div with "content" or "answer", or just a paragraph)
+            answer_tag = item.find(['div', 'p'], class_=re.compile(r'(content|answer|body|panel)', re.I))
+    
+            # If we couldn't find a specific answer tag, a reasonable guess is the *next* sibling div or p
+            if question_tag and not answer_tag:
+                answer_tag = question_tag.find_next_sibling(['div', 'p'])
+                
+            if question_tag and answer_tag:
+                question = question_tag.get_text(strip=True)
+                answer = answer_tag.get_text(separator='\n', strip=True)
+    
+                # Basic validation: ensure we found non-empty text
+                if question and answer and 'your-question-here' not in question.lower():
+                    print(f"  [Accordion Hunter] Found Q: {question[:30]}...")
+                    faqs_list.append({"question": question, "answer": answer})
+    
+        # If the Accordion Hunter was successful, we can return the results.
+        if faqs_list:
+            print(f"--- FAQ Hunt Successful: Found {len(faqs_list)} items using Accordion Strategy. ---")
+            return faqs_list
+    
+        # --- STRATEGY 2: The Linked Questions Hunter ---
+        print("--- Accordion Hunter found nothing. Trying Linked Questions Hunter. ---")
+        # This strategy runs if the first one failed. It looks for a list of links.
+        # We target the main content area to avoid grabbing header/footer links.
+        main_area = faq_soup.main or faq_soup.body
+        question_links = main_area.find_all('a', href=re.compile(r'(faq|question|/a/)'))
+    
+        if not question_links: # Broaden search if specific one fails
+            question_links = [a for a in main_area.find_all('a', href=True) if '?' in a.get_text()]
+    
+        for link in question_links:
+            question_text = link.get_text(strip=True)
+            if question_text and len(question_text) > 5:
+                linked_url = urljoin(self.base_url, link['href'])
+                print(f"  [Link Hunter] Found linked question, fetching content from {linked_url}")
+                # Use our existing helper to grab the content from the linked page
+                answer_content = await self._fetch_and_format_page_content(linked_url)
+                if answer_content:
+                    faqs_list.append({"question": question_text, "answer": answer_content})
+    
+        if faqs_list:
+            print(f"--- FAQ Hunt Successful: Found {len(faqs_list)} items using Linked Questions Strategy. ---")
+            return faqs_list
+    
+        # --- STRATEGY 3: General Content Grab (Fallback) ---
+        print("--- Both specialized hunters failed. Using fallback content grab. ---")
+        fallback_content = await self._fetch_and_format_page_content(faq_url)
+        if fallback_content:
+            return [{"question": "General FAQ Page Content", "answer": fallback_content}]
+    
+        return [] # Return empty if all strategies fail
 
     async def _fetch_and_format_page_content(self, url: str) -> Optional[str]:
         """
@@ -264,7 +261,7 @@ class ShopifyScraper:
                 self.insights.policies[name] = policy_data
             elif name == 'FAQs':
                 # Call our new, specialized FAQ hunter
-                self.insights.faqs = await self._scrape_faqs_with_gemini(url)
+                self.insights.faqs = await self._scrape_faqs(url)
                 # We still save the main FAQ page link for reference
                 self.insights.important_links[name] = url
             else:
