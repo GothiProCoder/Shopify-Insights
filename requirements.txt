@@ -13,9 +13,9 @@ pydantic
 # For parsing emails and social handles reliably
 beautifulsoup4-helpers
 
-# Add these lines for the bonus database feature
+# Integration of the database feature
 sqlalchemy
-pymysql # To show we can support MySQL as requested
+pymysql
 
 # For Gemini Integration
 google-generativeai
